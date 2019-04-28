@@ -168,6 +168,7 @@ func (m *GracefulTerminationManager) deleteRsFunc(rsToDelete *listItem) (bool, e
 			// For UDP, ActiveConn is always 0
 			// For TCP, InactiveConn are connections not in ESTABLISHED state
 			if rs.ActiveConn+rs.InactiveConn != 0 {
+				klog.Infof("Not deleting, RS %v: %v ActiveConn, %v InactiveConn", rsToDelete.String(), rs.ActiveConn, rs.InactiveConn)
 				return false, nil
 			}
 			klog.Infof("Deleting rs: %s", rsToDelete.String())
@@ -203,21 +204,5 @@ func (m *GracefulTerminationManager) MoveRSOutofGracefulDeleteList(uniqueRS stri
 
 // Run start a goroutine to try to delete rs in the graceful delete rsList with an interval 1 minute
 func (m *GracefulTerminationManager) Run() {
-	// before start, add leftover in delete rs to graceful delete rsList
-	vss, err := m.ipvs.GetVirtualServers()
-	if err != nil {
-		klog.Errorf("IPVS graceful delete manager failed to get IPVS virtualserver")
-	}
-	for _, vs := range vss {
-		rss, err := m.ipvs.GetRealServers(vs)
-		if err != nil {
-			klog.Errorf("IPVS graceful delete manager failed to get %v realserver", vs)
-			continue
-		}
-		for _, rs := range rss {
-			m.GracefulDeleteRS(vs, rs)
-		}
-	}
-
 	go wait.Until(m.tryDeleteRs, rsCheckDeleteInterval, wait.NeverStop)
 }

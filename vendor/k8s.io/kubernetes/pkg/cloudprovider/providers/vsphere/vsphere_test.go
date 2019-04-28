@@ -22,11 +22,15 @@ import (
 	"crypto/x509"
 	"io/ioutil"
 	"log"
+	"net/url"
 	"os"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/vmware/govmomi/find"
 	lookup "github.com/vmware/govmomi/lookup/simulator"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/simulator"
@@ -36,7 +40,8 @@ import (
 	vapi "github.com/vmware/govmomi/vapi/simulator"
 	"github.com/vmware/govmomi/vapi/tags"
 	"github.com/vmware/govmomi/vim25/mo"
-	"k8s.io/api/core/v1"
+	vmwaretypes "github.com/vmware/govmomi/vim25/types"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	cloudprovider "k8s.io/cloud-provider"
@@ -339,6 +344,10 @@ func TestZones(t *testing.T) {
 	cfg, cleanup := configFromSim()
 	defer cleanup()
 
+	// Configure for SAML token auth
+	cfg.Global.User = localhostCert
+	cfg.Global.Password = localhostKey
+
 	// Create vSphere configuration object
 	vs, err := newControllerNode(cfg)
 	if err != nil {
@@ -377,6 +386,13 @@ func TestZones(t *testing.T) {
 
 	// Tag manager instance
 	m := tags.NewManager(rest.NewClient(vsi.conn.Client))
+	signer, err := vsi.conn.Signer(ctx, vsi.conn.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.LoginByToken(m.WithSigner(ctx, signer)); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a region category
 	regionID, err := m.CreateCategory(ctx, &tags.Category{Name: vs.cfg.Labels.Region})
@@ -485,6 +501,196 @@ func TestZones(t *testing.T) {
 			t.Logf("zone=%#v", zone)
 		}
 	}
+}
+
+func TestGetZoneToHosts(t *testing.T) {
+	// Common setup for all testcases in this test
+	ctx := context.TODO()
+
+	// Create a vcsim instance
+	cfg, cleanup := configFromSim()
+	defer cleanup()
+
+	// Create vSphere configuration object
+	vs, err := newControllerNode(cfg)
+	if err != nil {
+		t.Fatalf("Failed to construct/authenticate vSphere: %s", err)
+	}
+
+	// Configure region and zone categories
+	vs.cfg.Labels.Region = "k8s-region"
+	vs.cfg.Labels.Zone = "k8s-zone"
+
+	// Create vSphere client
+	vsi, ok := vs.vsphereInstanceMap[cfg.Global.VCenterIP]
+	if !ok {
+		t.Fatalf("Couldn't get vSphere instance: %s", cfg.Global.VCenterIP)
+	}
+
+	err = vsi.conn.Connect(ctx)
+	if err != nil {
+		t.Errorf("Failed to connect to vSphere: %s", err)
+	}
+
+	// Lookup Datacenter for this test's Workspace
+	dc, err := vclib.GetDatacenter(ctx, vsi.conn, vs.cfg.Workspace.Datacenter)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Property Collector instance
+	pc := property.DefaultCollector(vsi.conn.Client)
+
+	// find all hosts in VC
+	finder := find.NewFinder(vsi.conn.Client, true)
+	finder.SetDatacenter(dc.Datacenter)
+	allVcHostsList, err := finder.HostSystemList(ctx, "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allVcHosts []vmwaretypes.ManagedObjectReference
+	for _, h := range allVcHostsList {
+		allVcHosts = append(allVcHosts, h.Reference())
+	}
+
+	// choose a cluster to apply zone/region tags
+	cluster := simulator.Map.Any("ClusterComputeResource")
+	var c mo.ClusterComputeResource
+	if err := pc.RetrieveOne(ctx, cluster.Reference(), []string{"host"}, &c); err != nil {
+		t.Fatal(err)
+	}
+
+	// choose one of the host inside this cluster to apply zone/region tags
+	if c.Host == nil || len(c.Host) == 0 {
+		t.Fatalf("This test needs a host inside a cluster.")
+	}
+	clusterHosts := c.Host
+	sortHosts(clusterHosts)
+	// pick the first host in the cluster to apply tags
+	host := clusterHosts[0]
+	remainingHostsInCluster := clusterHosts[1:]
+
+	// Tag manager instance
+	m := tags.NewManager(rest.NewClient(vsi.conn.Client))
+	user := url.UserPassword(vsi.conn.Username, vsi.conn.Password)
+	if err = m.Login(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a region category
+	regionCat, err := m.CreateCategory(ctx, &tags.Category{Name: vs.cfg.Labels.Region})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a region tag
+	regionName := "k8s-region-US"
+	regionTag, err := m.CreateTag(ctx, &tags.Tag{CategoryID: regionCat, Name: regionName})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a zone category
+	zoneCat, err := m.CreateCategory(ctx, &tags.Category{Name: vs.cfg.Labels.Zone})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a zone tag
+	zone1Name := "k8s-zone-US-CA1"
+	zone1Tag, err := m.CreateTag(ctx, &tags.Tag{CategoryID: zoneCat, Name: zone1Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone1 := cloudprovider.Zone{FailureDomain: zone1Name, Region: regionName}
+
+	// Create a second zone tag
+	zone2Name := "k8s-zone-US-CA2"
+	zone2Tag, err := m.CreateTag(ctx, &tags.Tag{CategoryID: zoneCat, Name: zone2Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone2 := cloudprovider.Zone{FailureDomain: zone2Name, Region: regionName}
+
+	testcases := []struct {
+		name        string
+		tags        map[string][]mo.Reference
+		zoneToHosts map[cloudprovider.Zone][]vmwaretypes.ManagedObjectReference
+	}{
+		{
+			name:        "Zone and Region tags on host",
+			tags:        map[string][]mo.Reference{zone1Tag: {host}, regionTag: {host}},
+			zoneToHosts: map[cloudprovider.Zone][]vmwaretypes.ManagedObjectReference{zone1: {host}},
+		},
+		{
+			name:        "Zone on host Region on datacenter",
+			tags:        map[string][]mo.Reference{zone1Tag: {host}, regionTag: {dc}},
+			zoneToHosts: map[cloudprovider.Zone][]vmwaretypes.ManagedObjectReference{zone1: {host}},
+		},
+		{
+			name:        "Zone on cluster Region on datacenter",
+			tags:        map[string][]mo.Reference{zone1Tag: {cluster}, regionTag: {dc}},
+			zoneToHosts: map[cloudprovider.Zone][]vmwaretypes.ManagedObjectReference{zone1: clusterHosts},
+		},
+		{
+			name:        "Zone on cluster and override on host",
+			tags:        map[string][]mo.Reference{zone2Tag: {cluster}, zone1Tag: {host}, regionTag: {dc}},
+			zoneToHosts: map[cloudprovider.Zone][]vmwaretypes.ManagedObjectReference{zone1: {host}, zone2: remainingHostsInCluster},
+		},
+		{
+			name:        "Zone and Region on datacenter",
+			tags:        map[string][]mo.Reference{zone1Tag: {dc}, regionTag: {dc}},
+			zoneToHosts: map[cloudprovider.Zone][]vmwaretypes.ManagedObjectReference{zone1: allVcHosts},
+		},
+	}
+
+	for _, testcase := range testcases {
+		t.Run(testcase.name, func(t *testing.T) {
+			// apply tags to datacenter/cluster/host as per this testcase
+			for tagId, objects := range testcase.tags {
+				for _, object := range objects {
+					if err := m.AttachTag(ctx, tagId, object); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			// run the test
+			zoneToHosts, err := vs.GetZoneToHosts(ctx, vsi)
+			if err != nil {
+				t.Errorf("unexpected error when calling GetZoneToHosts: %q", err)
+			}
+
+			// do not depend on the sort order of hosts in result
+			sortHostsMap(zoneToHosts)
+			if !reflect.DeepEqual(zoneToHosts, testcase.zoneToHosts) {
+				t.Logf("expected result: %+v", testcase.zoneToHosts)
+				t.Logf("actual result: %+v", zoneToHosts)
+				t.Error("unexpected result from GetZoneToHosts")
+			}
+
+			// clean up tags applied on datacenter/cluster/host for this testcase
+			for tagId, objects := range testcase.tags {
+				for _, object := range objects {
+					if err = m.DetachTag(ctx, tagId, object); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func sortHostsMap(zoneToHosts map[cloudprovider.Zone][]vmwaretypes.ManagedObjectReference) {
+	for _, hosts := range zoneToHosts {
+		sortHosts(hosts)
+	}
+}
+
+func sortHosts(hosts []vmwaretypes.ManagedObjectReference) {
+	sort.Slice(hosts, func(i, j int) bool {
+		return hosts[i].Value < hosts[j].Value
+	})
 }
 
 func TestInstances(t *testing.T) {

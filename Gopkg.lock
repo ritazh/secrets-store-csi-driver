@@ -291,25 +291,26 @@
   version = "v0.1.0"
 
 [[projects]]
-  digest = "1:abf4524767db373f5535e5b8278c7974d7a1365943d5a209ae31c42b292756d9"
+  digest = "1:8c244615bb96a1875f2ac63d6151beb17461a79dedcb59f8129c9ef39d3fb373"
   name = "k8s.io/kubernetes"
-  packages = [
-    "pkg/util/file",
-    "pkg/util/io",
-    "pkg/util/mount",
-    "pkg/util/nsenter",
-  ]
+  packages = ["pkg/util/mount"]
   pruneopts = ""
-  revision = "eec55b9ba98609a46fee712359c7b5b365bdd920"
-  version = "v1.13.1"
+  revision = "b7394102d6ef778017f2ca4046abbaa23b88c290"
+  version = "v1.14.1"
 
 [[projects]]
   branch = "master"
-  digest = "1:8b4b9c29be72c176988b04d5acc665c093b1efac228835f0a4716531c1f7563e"
+  digest = "1:f6c19347011ba9a072aa55f5c7fa630c0b88303ac4ca83008454aef95b0c2078"
   name = "k8s.io/utils"
-  packages = ["exec"]
+  packages = [
+    "exec",
+    "io",
+    "keymutex",
+    "nsenter",
+    "path",
+  ]
   pruneopts = ""
-  revision = "8a16e7dd8fb6d97d1331b0c79a16722f934b00b1"
+  revision = "21c4ce38f2a793ec01e925ddc31216500183b773"
 
 [solve-meta]
   analyzer-name = "dep"
