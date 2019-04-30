@@ -35,7 +35,7 @@ import (
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1beta1 "k8s.io/api/rbac/v1beta1"
-	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -285,6 +285,7 @@ func AddHandlers(h printers.PrintHandler) {
 		{Name: "StorageClass", Type: "string", Description: "StorageClass of the pv"},
 		{Name: "Reason", Type: "string", Description: apiv1.PersistentVolumeStatus{}.SwaggerDoc()["reason"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+		{Name: "VolumeMode", Type: "string", Priority: 1, Description: apiv1.PersistentVolumeSpec{}.SwaggerDoc()["volumeMode"]},
 	}
 	h.TableHandler(persistentVolumeColumnDefinitions, printPersistentVolume)
 	h.TableHandler(persistentVolumeColumnDefinitions, printPersistentVolumeList)
@@ -297,6 +298,7 @@ func AddHandlers(h printers.PrintHandler) {
 		{Name: "Access Modes", Type: "string", Description: apiv1.PersistentVolumeClaimStatus{}.SwaggerDoc()["accessModes"]},
 		{Name: "StorageClass", Type: "string", Description: "StorageClass of the pvc"},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+		{Name: "VolumeMode", Type: "string", Priority: 1, Description: apiv1.PersistentVolumeClaimSpec{}.SwaggerDoc()["volumeMode"]},
 	}
 	h.TableHandler(persistentVolumeClaimColumnDefinitions, printPersistentVolumeClaim)
 	h.TableHandler(persistentVolumeClaimColumnDefinitions, printPersistentVolumeClaimList)
@@ -430,19 +432,19 @@ func AddHandlers(h printers.PrintHandler) {
 	h.TableHandler(controllerRevisionColumnDefinition, printControllerRevision)
 	h.TableHandler(controllerRevisionColumnDefinition, printControllerRevisionList)
 
-	resorceQuotaColumnDefinitions := []metav1beta1.TableColumnDefinition{
+	resourceQuotaColumnDefinitions := []metav1beta1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 		{Name: "Request", Type: "string", Description: "Request represents a minimum amount of cpu/memory that a container may consume."},
 		{Name: "Limit", Type: "string", Description: "Limits control the maximum amount of cpu/memory that a container may use independent of contention on the node."},
 	}
-	h.TableHandler(resorceQuotaColumnDefinitions, printResourceQuota)
-	h.TableHandler(resorceQuotaColumnDefinitions, printResourceQuotaList)
+	h.TableHandler(resourceQuotaColumnDefinitions, printResourceQuota)
+	h.TableHandler(resourceQuotaColumnDefinitions, printResourceQuotaList)
 
 	priorityClassColumnDefinitions := []metav1beta1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "Value", Type: "integer", Description: schedulingv1beta1.PriorityClass{}.SwaggerDoc()["value"]},
-		{Name: "Global-Default", Type: "boolean", Description: schedulingv1beta1.PriorityClass{}.SwaggerDoc()["globalDefault"]},
+		{Name: "Value", Type: "integer", Description: schedulingv1.PriorityClass{}.SwaggerDoc()["value"]},
+		{Name: "Global-Default", Type: "boolean", Description: schedulingv1.PriorityClass{}.SwaggerDoc()["globalDefault"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 	}
 	h.TableHandler(priorityClassColumnDefinitions, printPriorityClass)
@@ -455,6 +457,17 @@ func AddHandlers(h printers.PrintHandler) {
 	}
 	h.TableHandler(runtimeClassColumnDefinitions, printRuntimeClass)
 	h.TableHandler(runtimeClassColumnDefinitions, printRuntimeClassList)
+
+	volumeAttachmentColumnDefinitions := []metav1beta1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "Attacher", Type: "string", Format: "name", Description: storagev1.VolumeAttachmentSpec{}.SwaggerDoc()["attacher"]},
+		{Name: "PV", Type: "string", Description: storagev1.VolumeAttachmentSource{}.SwaggerDoc()["persistentVolumeName"]},
+		{Name: "Node", Type: "string", Description: storagev1.VolumeAttachmentSpec{}.SwaggerDoc()["nodeName"]},
+		{Name: "Attached", Type: "boolean", Description: storagev1.VolumeAttachmentStatus{}.SwaggerDoc()["attached"]},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+	}
+	h.TableHandler(volumeAttachmentColumnDefinitions, printVolumeAttachment)
+	h.TableHandler(volumeAttachmentColumnDefinitions, printVolumeAttachmentList)
 
 	AddDefaultHandlers(h)
 }
@@ -845,7 +858,7 @@ func printJob(obj *batch.Job, options printers.PrintOptions) ([]metav1beta1.Tabl
 	switch {
 	case obj.Status.StartTime == nil:
 	case obj.Status.CompletionTime == nil:
-		jobDuration = duration.HumanDuration(time.Now().Sub(obj.Status.StartTime.Time))
+		jobDuration = duration.HumanDuration(time.Since(obj.Status.StartTime.Time))
 	default:
 		jobDuration = duration.HumanDuration(obj.Status.CompletionTime.Sub(obj.Status.StartTime.Time))
 	}
@@ -997,14 +1010,6 @@ func printServiceList(list *api.ServiceList, options printers.PrintOptions) ([]m
 		rows = append(rows, r...)
 	}
 	return rows, nil
-}
-
-// backendStringer behaves just like a string interface and converts the given backend to a string.
-func backendStringer(backend *networking.IngressBackend) string {
-	if backend == nil {
-		return ""
-	}
-	return fmt.Sprintf("%v:%v", backend.ServiceName, backend.ServicePort.String())
 }
 
 func formatHosts(rules []networking.IngressRule) string {
@@ -1325,11 +1330,14 @@ func printPersistentVolume(obj *api.PersistentVolume, options printers.PrintOpti
 	if obj.ObjectMeta.DeletionTimestamp != nil {
 		phase = "Terminating"
 	}
+	volumeMode := "<unset>"
+	if obj.Spec.VolumeMode != nil {
+		volumeMode = string(*obj.Spec.VolumeMode)
+	}
 
 	row.Cells = append(row.Cells, obj.Name, aSize, modesStr, reclaimPolicyStr,
 		string(phase), claimRefUID, helper.GetPersistentVolumeClass(obj),
-		obj.Status.Reason,
-		translateTimestampSince(obj.CreationTimestamp))
+		obj.Status.Reason, translateTimestampSince(obj.CreationTimestamp), volumeMode)
 	return []metav1beta1.TableRow{row}, nil
 }
 
@@ -1358,13 +1366,19 @@ func printPersistentVolumeClaim(obj *api.PersistentVolumeClaim, options printers
 	storage := obj.Spec.Resources.Requests[api.ResourceStorage]
 	capacity := ""
 	accessModes := ""
+	volumeMode := "<unset>"
 	if obj.Spec.VolumeName != "" {
 		accessModes = helper.GetAccessModesAsString(obj.Status.AccessModes)
 		storage = obj.Status.Capacity[api.ResourceStorage]
 		capacity = storage.String()
 	}
 
-	row.Cells = append(row.Cells, obj.Name, string(phase), obj.Spec.VolumeName, capacity, accessModes, helper.GetPersistentVolumeClaimClass(obj), translateTimestampSince(obj.CreationTimestamp))
+	if obj.Spec.VolumeMode != nil {
+		volumeMode = string(*obj.Spec.VolumeMode)
+	}
+
+	row.Cells = append(row.Cells, obj.Name, string(phase), obj.Spec.VolumeName, capacity, accessModes,
+		helper.GetPersistentVolumeClaimClass(obj), translateTimestampSince(obj.CreationTimestamp), volumeMode)
 	return []metav1beta1.TableRow{row}, nil
 }
 
@@ -1891,7 +1905,7 @@ func printControllerRevision(obj *apps.ControllerRevision, options printers.Prin
 			return nil, err
 		}
 		gvk := gv.WithKind(controllerRef.Kind)
-		controllerName = printers.FormatResourceName(gvk.GroupKind(), controllerRef.Name, withKind)
+		controllerName = formatResourceName(gvk.GroupKind(), controllerRef.Name, withKind)
 	}
 	revision := obj.Revision
 	age := translateTimestampSince(obj.CreationTimestamp)
@@ -1909,6 +1923,16 @@ func printControllerRevisionList(list *apps.ControllerRevisionList, options prin
 		rows = append(rows, r...)
 	}
 	return rows, nil
+}
+
+// formatResourceName receives a resource kind, name, and boolean specifying
+// whether or not to update the current name to "kind/name"
+func formatResourceName(kind schema.GroupKind, name string, withKind bool) string {
+	if !withKind || kind.Empty() {
+		return name
+	}
+
+	return strings.ToLower(kind.String()) + "/" + name
 }
 
 func printResourceQuota(resourceQuota *api.ResourceQuota, options printers.PrintOptions) ([]metav1beta1.TableRow, error) {
@@ -1996,6 +2020,34 @@ func printRuntimeClassList(list *nodeapi.RuntimeClassList, options printers.Prin
 	rows := make([]metav1beta1.TableRow, 0, len(list.Items))
 	for i := range list.Items {
 		r, err := printRuntimeClass(&list.Items[i], options)
+
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
+func printVolumeAttachment(obj *storage.VolumeAttachment, options printers.PrintOptions) ([]metav1beta1.TableRow, error) {
+	row := metav1beta1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+
+	name := obj.Name
+	pvName := ""
+	if obj.Spec.Source.PersistentVolumeName != nil {
+		pvName = *obj.Spec.Source.PersistentVolumeName
+	}
+	row.Cells = append(row.Cells, name, obj.Spec.Attacher, pvName, obj.Spec.NodeName, obj.Status.Attached, translateTimestampSince(obj.CreationTimestamp))
+
+	return []metav1beta1.TableRow{row}, nil
+}
+
+func printVolumeAttachmentList(list *storage.VolumeAttachmentList, options printers.PrintOptions) ([]metav1beta1.TableRow, error) {
+	rows := make([]metav1beta1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printVolumeAttachment(&list.Items[i], options)
 		if err != nil {
 			return nil, err
 		}

@@ -275,14 +275,6 @@
   version = "v2.2.2"
 
 [[projects]]
-  branch = "master"
-  digest = "1:6149dfd7594a25a0e99d0731f76c30ca9a877d258d27b2d2ef87ae178dc6c137"
-  name = "k8s.io/apimachinery"
-  packages = ["pkg/util/sets"]
-  pruneopts = ""
-  revision = "98853ca904e81a25e2000cae7f077dc30f81b85f"
-
-[[projects]]
   digest = "1:4f5eb833037cc0ba0bf8fe9cae6be9df62c19dd1c869415275c708daa8ccfda5"
   name = "k8s.io/klog"
   packages = ["."]
@@ -291,12 +283,12 @@
   version = "v0.1.0"
 
 [[projects]]
-  digest = "1:8c244615bb96a1875f2ac63d6151beb17461a79dedcb59f8129c9ef39d3fb373"
+  digest = "1:b59fa9278c796ec14a4a50ae9041d80a70593fa020a139e70e4a5c1ba4dd0bd6"
   name = "k8s.io/kubernetes"
   packages = ["pkg/util/mount"]
   pruneopts = ""
-  revision = "b7394102d6ef778017f2ca4046abbaa23b88c290"
-  version = "v1.14.1"
+  revision = "306740f81c3b46b745ea85c8c641dcc46e3183cf"
+  version = "v1.15.0-alpha.2"
 
 [[projects]]
   branch = "master"
@@ -306,7 +298,6 @@
     "exec",
     "io",
     "keymutex",
-    "nsenter",
     "path",
   ]
   pruneopts = ""

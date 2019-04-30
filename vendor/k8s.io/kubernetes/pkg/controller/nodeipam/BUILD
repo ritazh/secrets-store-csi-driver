@@ -26,7 +26,6 @@ go_library(
     name = "go_default_library",
     srcs = [
         "doc.go",
-        "metrics.go",
         "node_ipam_controller.go",
     ],
     importpath = "k8s.io/kubernetes/pkg/controller/nodeipam",
@@ -59,6 +58,7 @@ filegroup(
     name = "all-srcs",
     srcs = [
         ":package-srcs",
+        "//pkg/controller/nodeipam/config:all-srcs",
         "//pkg/controller/nodeipam/ipam:all-srcs",
     ],
     tags = ["automanaged"],

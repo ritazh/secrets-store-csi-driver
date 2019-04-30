@@ -63,6 +63,7 @@ type Rule struct {
 	Scope *ScopeType
 }
 
+// ScopeType specifies the type of scope being used
 type ScopeType string
 
 const (
@@ -75,6 +76,7 @@ const (
 	AllScopes ScopeType = "*"
 )
 
+// FailurePolicyType specifies the type of failure policy
 type FailurePolicyType string
 
 const (
@@ -84,6 +86,7 @@ const (
 	Fail FailurePolicyType = "Fail"
 )
 
+// SideEffectClass denotes the type of side effects resulting from calling the webhook
 type SideEffectClass string
 
 const (
@@ -263,6 +266,7 @@ type RuleWithOperations struct {
 	Rule
 }
 
+// OperationType specifies what type of operation the admission hook cares about.
 type OperationType string
 
 // The constants should be kept in sync with those defined in k8s.io/kubernetes/pkg/admission/interface.go.
@@ -311,8 +315,6 @@ type WebhookClientConfig struct {
 	//
 	// If the webhook is running within the cluster, then you should use `service`.
 	//
-	// Port 443 will be used if it is open, otherwise it is an error.
-	//
 	// +optional
 	Service *ServiceReference
 
@@ -335,4 +337,9 @@ type ServiceReference struct {
 	// this service.
 	// +optional
 	Path *string
+
+	// If specified, the port on the service that hosting webhook.
+	// `port` should be a valid port number (1-65535, inclusive).
+	// +optional
+	Port int32
 }

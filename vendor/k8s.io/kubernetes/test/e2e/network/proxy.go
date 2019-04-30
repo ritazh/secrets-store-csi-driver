@@ -26,13 +26,14 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/net"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	"k8s.io/kubernetes/test/e2e/framework/endpoints"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
@@ -54,7 +55,7 @@ const (
 var _ = SIGDescribe("Proxy", func() {
 	version := "v1"
 	Context("version "+version, func() {
-		options := framework.FrameworkOptions{
+		options := framework.Options{
 			ClientQPS: -1.0,
 		}
 		f := framework.NewFramework("proxy", options, nil)
@@ -122,13 +123,12 @@ var _ = SIGDescribe("Proxy", func() {
 			By("starting an echo server on multiple ports")
 			pods := []*v1.Pod{}
 			cfg := testutils.RCConfig{
-				Client:         f.ClientSet,
-				InternalClient: f.InternalClientset,
-				Image:          imageutils.GetE2EImage(imageutils.Porter),
-				Name:           service.Name,
-				Namespace:      f.Namespace.Name,
-				Replicas:       1,
-				PollInterval:   time.Second,
+				Client:       f.ClientSet,
+				Image:        imageutils.GetE2EImage(imageutils.Porter),
+				Name:         service.Name,
+				Namespace:    f.Namespace.Name,
+				Replicas:     1,
+				PollInterval: time.Second,
 				Env: map[string]string{
 					"SERVE_PORT_80":   `<a href="/rewriteme">test</a>`,
 					"SERVE_PORT_1080": `<a href="/rewriteme">test</a>`,
@@ -162,7 +162,7 @@ var _ = SIGDescribe("Proxy", func() {
 			Expect(framework.RunRC(cfg)).NotTo(HaveOccurred())
 			defer framework.DeleteRCAndWaitForGC(f.ClientSet, f.Namespace.Name, cfg.Name)
 
-			Expect(framework.WaitForEndpoint(f.ClientSet, f.Namespace.Name, service.Name)).NotTo(HaveOccurred())
+			Expect(endpoints.WaitForEndpoint(f.ClientSet, f.Namespace.Name, service.Name)).NotTo(HaveOccurred())
 
 			// table constructors
 			// Try proxying through the service and directly to through the pod.

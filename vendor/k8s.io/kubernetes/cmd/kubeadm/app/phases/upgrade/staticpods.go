@@ -18,12 +18,12 @@ package upgrade
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/version"
 	clientset "k8s.io/client-go/kubernetes"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
@@ -148,25 +148,26 @@ func (spm *KubeStaticPodPathManager) BackupEtcdDir() string {
 
 // CleanupDirs cleans up all temporary directories except those the user has requested to keep around
 func (spm *KubeStaticPodPathManager) CleanupDirs() error {
+	var errlist []error
 	if err := os.RemoveAll(spm.TempManifestDir()); err != nil {
-		return err
+		errlist = append(errlist, err)
 	}
 	if !spm.keepManifestDir {
 		if err := os.RemoveAll(spm.BackupManifestDir()); err != nil {
-			return err
+			errlist = append(errlist, err)
 		}
 	}
 
 	if !spm.keepEtcdDir {
 		if err := os.RemoveAll(spm.BackupEtcdDir()); err != nil {
-			return err
+			errlist = append(errlist, err)
 		}
 	}
 
-	return nil
+	return utilerrors.NewAggregate(errlist)
 }
 
-func upgradeComponent(component string, waiter apiclient.Waiter, pathMgr StaticPodPathManager, cfg *kubeadmapi.InitConfiguration, beforePodHash string, recoverManifests map[string]string) error {
+func upgradeComponent(component string, renewCerts bool, waiter apiclient.Waiter, pathMgr StaticPodPathManager, cfg *kubeadmapi.InitConfiguration, beforePodHash string, recoverManifests map[string]string) error {
 	// Special treatment is required for etcd case, when rollbackOldManifests should roll back etcd
 	// manifests only for the case when component is Etcd
 	recoverEtcd := false
@@ -175,9 +176,7 @@ func upgradeComponent(component string, waiter apiclient.Waiter, pathMgr StaticP
 		recoverEtcd = true
 	}
 
-	if err := renewCerts(cfg, component); err != nil {
-		return errors.Wrapf(err, "failed to renew certificates for component %q", component)
-	}
+	fmt.Printf("[upgrade/staticpods] Preparing for %q upgrade\n", component)
 
 	// The old manifest is here; in the /etc/kubernetes/manifests/
 	currentManifestPath := pathMgr.RealManifestPath(component)
@@ -196,8 +195,16 @@ func upgradeComponent(component string, waiter apiclient.Waiter, pathMgr StaticP
 		return err
 	}
 	if equal {
-		fmt.Printf("[upgrade/staticpods] current and new manifests of %s are equal, skipping upgrade\n", component)
+		fmt.Printf("[upgrade/staticpods] Current and new manifests of %s are equal, skipping upgrade\n", component)
 		return nil
+	}
+
+	// if certificate renewal should be performed
+	if renewCerts {
+		// renew all the certificates used by the current component
+		if err := renewCertsByComponent(cfg, component); err != nil {
+			return errors.Wrapf(err, "failed to renew certificates for component %q", component)
+		}
 	}
 
 	// Move the old manifest into the old-manifests directory
@@ -238,7 +245,7 @@ func upgradeComponent(component string, waiter apiclient.Waiter, pathMgr StaticP
 }
 
 // performEtcdStaticPodUpgrade performs upgrade of etcd, it returns bool which indicates fatal error or not and the actual error.
-func performEtcdStaticPodUpgrade(client clientset.Interface, waiter apiclient.Waiter, pathMgr StaticPodPathManager, cfg *kubeadmapi.InitConfiguration, recoverManifests map[string]string, oldEtcdClient, newEtcdClient etcdutil.ClusterInterrogator) (bool, error) {
+func performEtcdStaticPodUpgrade(renewCerts bool, client clientset.Interface, waiter apiclient.Waiter, pathMgr StaticPodPathManager, cfg *kubeadmapi.InitConfiguration, recoverManifests map[string]string, oldEtcdClient, newEtcdClient etcdutil.ClusterInterrogator) (bool, error) {
 	// Add etcd static pod spec only if external etcd is not configured
 	if cfg.Etcd.External != nil {
 		return false, errors.New("external etcd detected, won't try to change any etcd state")
@@ -264,30 +271,15 @@ func performEtcdStaticPodUpgrade(client clientset.Interface, waiter apiclient.Wa
 	}
 
 	// gets the etcd version of the local/stacked etcd member running on the current machine
-	// the version is read from che cluster; this should take into account that there are still
-	// around old etcd manifest with etcd listening on local host only
-	// N.B. taking care of old etcd manifests is necessary only in v1.14; starting from v1.15 all the etcd manifest should have 2 endpoints
 	currentEtcdVersions, err := oldEtcdClient.GetClusterVersions()
 	if err != nil {
 		return true, errors.Wrap(err, "failed to retrieve the current etcd version")
 	}
-
-	var ok bool
-	var currentEtcdVersionStr string
-	if etcdutil.IsEtcdListeningOnLocalHostOnly() {
-		// in case of etcd listening on local host only, there could be only etcd member in the cluster, and so
-		// also in the currentEtcdVersions map; we are using a for to take the value of the first element
-		for _, v := range currentEtcdVersions {
-			currentEtcdVersionStr = v
-			break
-		}
-	} else {
-		// otherwise take the etcd version of the etcd member hosted on the current machine
-		currentEtcdVersionStr, ok = currentEtcdVersions[etcdutil.GetClientURL(&cfg.LocalAPIEndpoint)]
-		if !ok {
-			return true, errors.Wrap(err, "failed to retrieve the current etcd version")
-		}
+	currentEtcdVersionStr, ok := currentEtcdVersions[etcdutil.GetClientURL(&cfg.LocalAPIEndpoint)]
+	if !ok {
+		return true, errors.Wrap(err, "failed to retrieve the current etcd version")
 	}
+
 	currentEtcdVersion, err := version.ParseSemantic(currentEtcdVersionStr)
 	if err != nil {
 		return true, errors.Wrapf(err, "failed to parse the current etcd version(%s)", currentEtcdVersionStr)
@@ -317,7 +309,7 @@ func performEtcdStaticPodUpgrade(client clientset.Interface, waiter apiclient.Wa
 	retryInterval := 15 * time.Second
 
 	// Perform etcd upgrade using common to all control plane components function
-	if err := upgradeComponent(constants.Etcd, waiter, pathMgr, cfg, beforeEtcdPodHash, recoverManifests); err != nil {
+	if err := upgradeComponent(constants.Etcd, renewCerts, waiter, pathMgr, cfg, beforeEtcdPodHash, recoverManifests); err != nil {
 		fmt.Printf("[upgrade/etcd] Failed to upgrade etcd: %v\n", err)
 		// Since upgrade component failed, the old etcd manifest has either been restored or was never touched
 		// Now we need to check the health of etcd cluster if it is up with old manifest
@@ -393,7 +385,7 @@ func performEtcdStaticPodUpgrade(client clientset.Interface, waiter apiclient.Wa
 }
 
 // StaticPodControlPlane upgrades a static pod-hosted control plane
-func StaticPodControlPlane(client clientset.Interface, waiter apiclient.Waiter, pathMgr StaticPodPathManager, cfg *kubeadmapi.InitConfiguration, etcdUpgrade bool, oldEtcdClient, newEtcdClient etcdutil.ClusterInterrogator) error {
+func StaticPodControlPlane(client clientset.Interface, waiter apiclient.Waiter, pathMgr StaticPodPathManager, cfg *kubeadmapi.InitConfiguration, etcdUpgrade, renewCerts bool, oldEtcdClient, newEtcdClient etcdutil.ClusterInterrogator) error {
 	recoverManifests := map[string]string{}
 	var isExternalEtcd bool
 
@@ -436,12 +428,12 @@ func StaticPodControlPlane(client clientset.Interface, waiter apiclient.Waiter, 
 		fmt.Printf("[upgrade/etcd] Upgrading to TLS for %s\n", constants.Etcd)
 
 		// Perform etcd upgrade using common to all control plane components function
-		fatal, err := performEtcdStaticPodUpgrade(client, waiter, pathMgr, cfg, recoverManifests, oldEtcdClient, newEtcdClient)
+		fatal, err := performEtcdStaticPodUpgrade(renewCerts, client, waiter, pathMgr, cfg, recoverManifests, oldEtcdClient, newEtcdClient)
 		if err != nil {
 			if fatal {
 				return err
 			}
-			fmt.Printf("[upgrade/etcd] non fatal issue encountered during upgrade: %v\n", err)
+			fmt.Printf("[upgrade/etcd] Non fatal issue encountered during upgrade: %v\n", err)
 		}
 	}
 
@@ -453,7 +445,7 @@ func StaticPodControlPlane(client clientset.Interface, waiter apiclient.Waiter, 
 	}
 
 	for _, component := range constants.ControlPlaneComponents {
-		if err = upgradeComponent(component, waiter, pathMgr, cfg, beforePodHashMap[component], recoverManifests); err != nil {
+		if err = upgradeComponent(component, renewCerts, waiter, pathMgr, cfg, beforePodHashMap[component], recoverManifests); err != nil {
 			return err
 		}
 	}
@@ -483,7 +475,8 @@ func rollbackOldManifests(oldManifests map[string]string, origErr error, pathMgr
 		}
 	}
 	// Let the user know there were problems, but we tried to recover
-	return errors.New("couldn't upgrade control plane. kubeadm has tried to recover everything into the earlier state. Errors faced")
+	return errors.Wrap(utilerrors.NewAggregate(errs),
+		"couldn't upgrade control plane. kubeadm has tried to recover everything into the earlier state. Errors faced")
 }
 
 // rollbackEtcdData rolls back the content of etcd folder if something went wrong.
@@ -500,47 +493,86 @@ func rollbackEtcdData(cfg *kubeadmapi.InitConfiguration, pathMgr StaticPodPathMa
 	return nil
 }
 
-func renewCerts(cfg *kubeadmapi.InitConfiguration, component string) error {
+// renewCertsByComponent takes charge of renewing certificates used by a specific component before
+// the static pod of the component is upgraded
+func renewCertsByComponent(cfg *kubeadmapi.InitConfiguration, component string) error {
+	// if the cluster is using a local etcd
 	if cfg.Etcd.Local != nil {
-		// ensure etcd certs are loaded for etcd and kube-apiserver
 		if component == constants.Etcd || component == constants.KubeAPIServer {
+			// try to load the etcd CA
 			caCert, caKey, err := certsphase.LoadCertificateAuthority(cfg.CertificatesDir, certsphase.KubeadmCertEtcdCA.BaseName)
 			if err != nil {
 				return errors.Wrapf(err, "failed to upgrade the %s CA certificate and key", constants.Etcd)
 			}
+			// create a renewer for certificates signed by etcd CA
 			renewer := renewal.NewFileRenewal(caCert, caKey)
-
+			// then, if upgrading the etcd component, renew all the certificates signed by etcd CA and used
+			// by etcd itself (the etcd-server, the etcd-peer and the etcd-healthcheck-client certificate)
 			if component == constants.Etcd {
 				for _, cert := range []*certsphase.KubeadmCert{
 					&certsphase.KubeadmCertEtcdServer,
 					&certsphase.KubeadmCertEtcdPeer,
 					&certsphase.KubeadmCertEtcdHealthcheck,
 				} {
-					if cert.BaseName == constants.EtcdServerCertAndKeyBaseName {
-						// When renewing the etcd server certificate it is necessary to mutate it from listening on
-						// localhost only to listening on localhost and API server advertise address (if not already the case)
-						// N.B. this code is necessary only in v1.14; starting from v1.15 all the etcd manifest should have 2 endpoints
-						advertiseAddress := net.ParseIP(cfg.LocalAPIEndpoint.AdvertiseAddress)
-						if advertiseAddress == nil {
-							return errors.Errorf("error parsing LocalAPIEndpoint AdvertiseAddress %q: is not a valid textual representation of an IP address", cfg.LocalAPIEndpoint.AdvertiseAddress)
-						}
-
-						if err := renewal.RenewAndMutateExistingEtcdServerCert(cfg.CertificatesDir, cert.BaseName, advertiseAddress, renewer); err != nil {
-							return errors.Wrapf(err, "failed to renew %s certificate and key", certsphase.KubeadmCertEtcdServer.Name)
-						}
-
-						continue
-					}
+					fmt.Printf("[upgrade/staticpods] Renewing %q certificate\n", cert.BaseName)
 					if err := renewal.RenewExistingCert(cfg.CertificatesDir, cert.BaseName, renewer); err != nil {
-						return errors.Wrapf(err, "failed to renew %s certificate and key", cert.Name)
+						return errors.Wrapf(err, "failed to renew %s certificates", cert.Name)
 					}
 				}
 			}
+			// if upgrading the apiserver component, renew the certificate signed by etcd CA and used
+			// by the apiserver (the apiserver-etcd-client certificate)
 			if component == constants.KubeAPIServer {
 				cert := certsphase.KubeadmCertEtcdAPIClient
+				fmt.Printf("[upgrade/staticpods] Renewing %q certificate\n", cert.BaseName)
 				if err := renewal.RenewExistingCert(cfg.CertificatesDir, cert.BaseName, renewer); err != nil {
 					return errors.Wrapf(err, "failed to renew %s certificate and key", cert.Name)
 				}
+			}
+		}
+	}
+	if component == constants.KubeAPIServer {
+		// Checks if an external CA is provided by the user (when the CA Cert is present but the CA Key is not)
+		// if not, then CA is managed by kubeadm, so it is possible to renew all the certificates signed by ca
+		// and used the apis server (the apiserver certificate and the apiserver-kubelet-client certificate)
+		externalCA, _ := certsphase.UsingExternalCA(&cfg.ClusterConfiguration)
+		if !externalCA {
+			// try to load ca
+			caCert, caKey, err := certsphase.LoadCertificateAuthority(cfg.CertificatesDir, certsphase.KubeadmCertRootCA.BaseName)
+			if err != nil {
+				return errors.Wrapf(err, "failed to upgrade the %s certificates", constants.KubeAPIServer)
+			}
+			// create a renewer for certificates signed by CA
+			renewer := renewal.NewFileRenewal(caCert, caKey)
+			// renew the certificates
+			for _, cert := range []*certsphase.KubeadmCert{
+				&certsphase.KubeadmCertAPIServer,
+				&certsphase.KubeadmCertKubeletClient,
+			} {
+				fmt.Printf("[upgrade/staticpods] Renewing %q certificate\n", cert.BaseName)
+				if err := renewal.RenewExistingCert(cfg.CertificatesDir, cert.BaseName, renewer); err != nil {
+					return errors.Wrapf(err, "failed to renew %s certificate and key", cert.Name)
+				}
+			}
+		}
+
+		// Checks if an external Front-Proxy CA is provided by the user (when the Front-Proxy CA Cert is present but the Front-Proxy CA Key is not)
+		// if not, then Front-Proxy CA is managed by kubeadm, so it is possible to renew all the certificates signed by ca
+		// and used the apis server (the front-proxy-client certificate)
+		externalFrontProxyCA, _ := certsphase.UsingExternalFrontProxyCA(&cfg.ClusterConfiguration)
+		if !externalFrontProxyCA {
+			// try to load front-proxy-ca
+			caCert, caKey, err := certsphase.LoadCertificateAuthority(cfg.CertificatesDir, certsphase.KubeadmCertFrontProxyCA.BaseName)
+			if err != nil {
+				return errors.Wrapf(err, "failed to upgrade the %s certificates", constants.KubeAPIServer)
+			}
+			// create a renewer for certificates signed by Front-Proxy CA
+			renewer := renewal.NewFileRenewal(caCert, caKey)
+			// renew the certificates
+			cert := certsphase.KubeadmCertFrontProxyClient
+			fmt.Printf("[upgrade/staticpods] Renewing %q certificate\n", cert.BaseName)
+			if err := renewal.RenewExistingCert(cfg.CertificatesDir, cert.BaseName, renewer); err != nil {
+				return errors.Wrapf(err, "failed to renew %s certificate and key", cert.Name)
 			}
 		}
 	}

@@ -42,7 +42,7 @@ import (
 	"github.com/elazarl/goproxy"
 	"sigs.k8s.io/yaml"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	rbacv1beta1 "k8s.io/api/rbac/v1beta1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -58,6 +58,8 @@ import (
 	"k8s.io/kubernetes/pkg/controller"
 	commonutils "k8s.io/kubernetes/test/e2e/common"
 	"k8s.io/kubernetes/test/e2e/framework"
+	"k8s.io/kubernetes/test/e2e/framework/auth"
+	jobutil "k8s.io/kubernetes/test/e2e/framework/job"
 	"k8s.io/kubernetes/test/e2e/framework/testfiles"
 	"k8s.io/kubernetes/test/e2e/scheduling"
 	testutils "k8s.io/kubernetes/test/utils"
@@ -76,6 +78,7 @@ const (
 	guestbookResponseTimeout = 3 * time.Minute
 	simplePodSelector        = "name=nginx"
 	simplePodName            = "nginx"
+	simplePodResourceName    = "pod/nginx"
 	nginxDefaultOutput       = "Welcome to nginx!"
 	simplePodPort            = 80
 	pausePodSelector         = "name=pause"
@@ -406,6 +409,14 @@ var _ = SIGDescribe("Kubectl client", func() {
 			}
 		})
 
+		ginkgo.It("should support exec using resource/name", func() {
+			ginkgo.By("executing a command in the container")
+			execOutput := framework.RunKubectlOrDie("exec", fmt.Sprintf("--namespace=%v", ns), simplePodResourceName, "echo", "running", "in", "container")
+			if e, a := "running in container", strings.TrimSpace(execOutput); e != a {
+				framework.Failf("Unexpected kubectl exec output. Wanted %q, got %q", e, a)
+			}
+		})
+
 		ginkgo.It("should support exec through an HTTP proxy", func() {
 			// Fail if the variable isn't set
 			if framework.TestContext.Host == "" {
@@ -570,6 +581,21 @@ var _ = SIGDescribe("Kubectl client", func() {
 			gomega.Expect(c.BatchV1().Jobs(ns).Delete("run-test-3", nil)).To(gomega.BeNil())
 		})
 
+		ginkgo.It("should contain last line of the log", func() {
+			nsFlag := fmt.Sprintf("--namespace=%v", ns)
+			podName := "run-log-test"
+
+			ginkgo.By("executing a command with run")
+			framework.RunKubectlOrDie("run", podName, "--generator=run-pod/v1", "--image="+busyboxImage, "--restart=OnFailure", nsFlag, "--", "sh", "-c", "sleep 10; seq 100 | while read i; do echo $i; sleep 0.01; done; echo EOF")
+
+			if !framework.CheckPodsRunningReady(c, ns, []string{podName}, framework.PodStartTimeout) {
+				framework.Failf("Pod for run-log-test was not ready")
+			}
+
+			logOutput := framework.RunKubectlOrDie(nsFlag, "logs", "-f", "run-log-test")
+			gomega.Expect(logOutput).To(gomega.ContainSubstring("EOF"))
+		})
+
 		ginkgo.It("should support port-forward", func() {
 			ginkgo.By("forwarding the container port to a local port")
 			cmd := runPortForward(ns, simplePodName, simplePodPort)
@@ -590,10 +616,11 @@ var _ = SIGDescribe("Kubectl client", func() {
 		ginkgo.It("should handle in-cluster config", func() {
 			ginkgo.By("adding rbac permissions")
 			// grant the view permission widely to allow inspection of the `invalid` namespace and the default namespace
-			framework.BindClusterRole(f.ClientSet.RbacV1beta1(), "view", f.Namespace.Name,
+			err := auth.BindClusterRole(f.ClientSet.RbacV1beta1(), "view", f.Namespace.Name,
 				rbacv1beta1.Subject{Kind: rbacv1beta1.ServiceAccountKind, Namespace: f.Namespace.Name, Name: "default"})
+			framework.ExpectNoError(err)
 
-			err := framework.WaitForAuthorizationUpdate(f.ClientSet.AuthorizationV1beta1(),
+			err = auth.WaitForAuthorizationUpdate(f.ClientSet.AuthorizationV1beta1(),
 				serviceaccount.MakeUsername(f.Namespace.Name, "default"),
 				f.Namespace.Name, "list", schema.GroupResource{Resource: "pods"}, true)
 			framework.ExpectNoError(err)
@@ -1684,7 +1711,7 @@ metadata:
 			gomega.Expect(runOutput).To(gomega.ContainSubstring("abcd1234"))
 			gomega.Expect(runOutput).To(gomega.ContainSubstring("stdin closed"))
 
-			err := framework.WaitForJobGone(c, ns, jobName, wait.ForeverTestTimeout)
+			err := jobutil.WaitForJobGone(c, ns, jobName, wait.ForeverTestTimeout)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("verifying the job " + jobName + " was deleted")
